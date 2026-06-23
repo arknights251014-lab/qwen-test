@@ -20,10 +20,12 @@ android {
 
     defaultConfig {
         applicationId "com.infinitybuy.v4"
+
         minSdk flutter.minSdkVersion
         targetSdk flutter.targetSdkVersion
-        versionCode flutterVersionCode.toInteger()
-        versionName flutterVersionName
+
+        versionCode 1
+        versionName "1.0"
     }
 
     buildTypes {
