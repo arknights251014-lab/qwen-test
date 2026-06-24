@@ -1,427 +1,384 @@
 import 'dart:math';
-import '../models/strategy_state.dart';
-import '../models/order.dart';
-import '../models/cycle_result.dart';
-import 'sma_service.dart';
+import 'order.dart';
+import 'cycle_result.dart';
+import 'strategy_state.dart';
 
-class DailyCalculation {
-  final List<Order> buyOrders;
-  final List<Order> sellOrders;
-  final StrategyState updatedState;
-  final String log;
+class DayResult {
+  final StrategyState state;
+  final CycleResult? cycleResult;
+  final List<Order> todaysOrders;
 
-  DailyCalculation({
-    required this.buyOrders,
-    required this.sellOrders,
-    required this.updatedState,
-    required this.log,
+  const DayResult({
+    required this.state,
+    this.cycleResult,
+    required this.todaysOrders,
+  });
+}
+
+class _InternalOrder {
+  final OrderType type;
+  final double price;
+  final double qty;
+  final String category;
+  final double? tDelta;
+  final double? tFactor;
+
+  _InternalOrder({
+    required this.type,
+    required this.price,
+    required this.qty,
+    required this.category,
+    this.tDelta,
+    this.tFactor,
   });
 }
 
 class StrategyEngine {
-  /// 하루 계산 실행 (PrevClose, PrevHigh 입력 후 호출)
-  static DailyCalculation calculate(
-    StrategyState state,
-    double prevClose,
-    double prevHigh,
-  ) {
-    final s = _cloneState(state);
-    final logs = <String>[];
-    final newBuyOrders = <Order>[];
-    final newSellOrders = <Order>[];
-
-    // 종가 이력 추가
-    s.closeHistory = SmaService.addClose(s.closeHistory, prevClose);
-
-    if (s.mode == StrategyMode.normal) {
-      _processNormalMode(s, prevClose, prevHigh, newBuyOrders, newSellOrders, logs);
-    } else {
-      _processReverseMode(s, prevClose, prevHigh, newBuyOrders, newSellOrders, logs);
+  DayResult processDay(StrategyState state, double prevClose, double prevHigh) {
+    // 1. Update History
+    List<double> newHistory = List.from(state.closeHistory);
+    newHistory.add(prevClose);
+    if (newHistory.length > 5) {
+      newHistory.removeAt(0);
     }
 
-    // 사이클 종료 체크
-    if (s.qty <= 3 && s.qty > 0) {
-      _completeCycle(s, prevClose, logs);
+    // Calculate SMA5
+    double sma5 = 0;
+    if (newHistory.isNotEmpty) {
+      // Spec: sum(CloseHistory) / 5
+      sma5 = newHistory.reduce((a, b) => a + b) / 5;
     }
 
-    // 통계 갱신
-    if (s.t > s.maxT) s.maxT = s.t;
-    if (s.qty > s.maxQty) s.maxQty = s.qty;
-    final exposure = s.qty * s.avg;
-    if (exposure > s.maxExposure) s.maxExposure = exposure;
-
-    // 리버스 전환 체크
-    if (s.mode == StrategyMode.normal && s.t > s.splitCount - 1) {
-      s.mode = StrategyMode.reverse;
-      logs.add('⚠️ REVERSE 모드 전환 (T=${s.t.toStringAsFixed(2)})');
+    // 2. Mode Transition
+    Mode currentMode = state.mode;
+    
+    // Check Reverse Entry
+    if (currentMode == Mode.normal && state.t > state.splitCount - 1) {
+      currentMode = Mode.reverse;
+    }
+    
+    // Check Reverse Exit
+    if (currentMode == Mode.reverse && state.hasPosition) {
+      double exitThreshold = state.avg * (1 - state.targetProfit / 100);
+      if (prevClose <= exitThreshold) {
+        currentMode = Mode.normal;
+      }
     }
 
-    return DailyCalculation(
-      buyOrders: newBuyOrders,
-      sellOrders: newSellOrders,
-      updatedState: s,
-      log: logs.join('\n'),
-    );
-  }
+    // 3. Generate Orders
+    List<_InternalOrder> internalOrders = [];
+    
+    void addOrder(OrderType type, double price, double qty, String category, {double? tDelta, double? tFactor}) {
+      if (qty > 0) {
+        internalOrders.add(_InternalOrder(
+          type: type,
+          price: price,
+          qty: qty,
+          category: category,
+          tDelta: tDelta,
+          tFactor: tFactor,
+        ));
+      }
+    }
 
-  // ───────────────────────────────────────────
-  // 일반 모드
-  // ───────────────────────────────────────────
-  static void _processNormalMode(
-    StrategyState s,
-    double prevClose,
-    double prevHigh,
-    List<Order> buyOrders,
-    List<Order> sellOrders,
-    List<String> logs,
-  ) {
-    // === 최초 진입 (Qty == 0) ===
-    if (s.qty == 0) {
-      final entryPrice = prevClose * (1 + s.targetProfit / 100);
-      final entryQty = (s.buyAmount / entryPrice).floor();
+    double cash = state.cash;
+    double qty = state.qty;
+    double avg = state.avg;
+    double t = state.t;
+    int n = state.splitCount;
+    double tp = state.targetProfit;
 
+    // Initial Entry
+    if (!state.hasPosition) {
+      double entryPrice = prevClose * (1 + tp / 100);
+      double buyAmount = cash / n;
+      double entryQty = (buyAmount / entryPrice).floorToDouble();
+      
       if (entryQty > 0) {
-        final order = Order(
-          id: _genId(),
-          type: OrderType.locBuy,
-          price: entryPrice,
-          qty: entryQty,
-          label: '최초진입 LOC매수',
-        );
-        // LOC Buy 체결 체크: PrevClose <= OrderPrice
-        if (prevClose <= entryPrice) {
-          _fillBuy(s, prevClose, entryQty);
-          s.t += 1;
-          order.status = OrderStatus.filled;
-          order.filledPrice = prevClose;
-          logs.add('✅ 최초진입 체결: ${entryQty}주 @ \$${prevClose.toStringAsFixed(2)}, T=${s.t}');
-        } else {
-          logs.add('⏳ 최초진입 미체결 (EntryPrice=\$${entryPrice.toStringAsFixed(2)})');
-        }
-        buyOrders.add(order);
-
-        // 추가 LOC 10개 (1주씩)
+        addOrder(OrderType.locBuy, entryPrice, entryQty, 'entry', tDelta: 1.0);
+        
         for (int i = 1; i <= 10; i++) {
-          final extraPrice = s.buyAmount / (entryQty + i);
-          final extraOrder = Order(
-            id: _genId(),
-            type: OrderType.locBuy,
-            price: extraPrice,
-            qty: 1,
-            label: '추가LOC$i',
-          );
-          if (prevClose <= extraPrice) {
-            _fillBuy(s, prevClose, 1);
-            // T 변화 없음
-            extraOrder.status = OrderStatus.filled;
-            extraOrder.filledPrice = prevClose;
-            logs.add('  ✅ 추가LOC$i 체결: 1주 @ \$${prevClose.toStringAsFixed(2)}');
-          }
-          buyOrders.add(extraOrder);
+          double extraPrice = buyAmount / (entryQty + i);
+          addOrder(OrderType.locBuy, extraPrice, 1.0, 'extra');
         }
       }
-      return;
-    }
+    } 
+    // Normal Mode
+    else if (currentMode == Mode.normal) {
+      double buyAmount = cash / (n - t);
+      double starPct = (tp / n) * 2 * t;
+      double starPrice = avg * (1 + starPct / 100);
+      double buyStar = starPrice - 0.01;
+      double sellStar = starPrice;
+      double finalSellPrice = avg * (1 + tp / 100);
+      
+      double quarterQty = (qty * 0.25).floorToDouble();
+      double finalQty = qty - quarterQty;
 
-    // === 전반전 / 후반전 ===
-    final isFirstHalf = s.t > 0 && s.t < s.splitCount / 2;
-    final isSecondHalf = s.t >= s.splitCount / 2 && s.t <= s.splitCount - 1;
-
-    // 순서: 1 Limit매도 → 2 쿼터LOC매도 → 3 StarBuy → 4 AvgBuy → 5 LOC10
-    // --- 1. 지정가 최종익절매도 ---
-    final quarterQty = (s.qty * 0.25).floor();
-    final finalQty = s.qty - quarterQty;
-    final finalSellPrice = s.avg * (1 + s.targetProfit / 100);
-
-    if (finalQty > 0) {
-      final limitOrder = Order(
-        id: _genId(),
-        type: OrderType.limitSell,
-        price: finalSellPrice,
-        qty: finalQty,
-        label: '최종익절 Limit매도',
-      );
-      // Limit Sell 체결: PrevHigh >= OrderPrice
-      if (prevHigh >= finalSellPrice) {
-        _fillSell(s, finalSellPrice, finalQty);
-        s.t = s.t * 0.25;
-        limitOrder.status = OrderStatus.filled;
-        limitOrder.filledPrice = finalSellPrice;
-        logs.add('✅ 최종익절 체결: ${finalQty}주 @ \$${finalSellPrice.toStringAsFixed(2)}, T=${s.t.toStringAsFixed(2)}');
+      if (finalQty > 0) {
+        addOrder(OrderType.limitSell, finalSellPrice, finalQty, 'limitSell', tFactor: 0.25);
       }
-      sellOrders.add(limitOrder);
-    }
-
-    // --- 2. 쿼터 LOC 매도 ---
-    if (quarterQty > 0) {
-      final sellStarPrice = s.sellStar;
-      final quarterOrder = Order(
-        id: _genId(),
-        type: OrderType.locSell,
-        price: sellStarPrice,
-        qty: quarterQty,
-        label: '쿼터LOC매도',
-      );
-      // LOC Sell 체결: PrevClose >= OrderPrice
-      if (prevClose >= sellStarPrice) {
-        _fillSell(s, prevClose, quarterQty);
-        s.t = s.t * 0.75;
-        quarterOrder.status = OrderStatus.filled;
-        quarterOrder.filledPrice = prevClose;
-        logs.add('✅ 쿼터매도 체결: ${quarterQty}주 @ \$${prevClose.toStringAsFixed(2)}, T=${s.t.toStringAsFixed(2)}');
+      if (quarterQty > 0) {
+        addOrder(OrderType.locSell, sellStar, quarterQty, 'quarterSell', tFactor: 0.75);
       }
-      sellOrders.add(quarterOrder);
-    }
 
-    // --- 3. StarBuy ---
-    if (isFirstHalf || isSecondHalf) {
-      final starBuyPrice = s.buyStar;
-      final starBuyQty = (s.buyAmount / starBuyPrice).floor();
-      if (starBuyQty > 0 && starBuyPrice > 0) {
-        final starOrder = Order(
-          id: _genId(),
-          type: OrderType.locBuy,
-          price: starBuyPrice,
-          qty: starBuyQty,
-          label: 'StarBuy LOC매수',
-        );
-        if (prevClose <= starBuyPrice) {
-          _fillBuy(s, prevClose, starBuyQty);
-          s.t += isFirstHalf ? 0.5 : 1.0;
-          starOrder.status = OrderStatus.filled;
-          starOrder.filledPrice = prevClose;
-          logs.add('✅ StarBuy 체결: ${starBuyQty}주 @ \$${prevClose.toStringAsFixed(2)}, T=${s.t.toStringAsFixed(2)}');
+      bool is1stHalf = t < (n / 2);
+      
+      if (is1stHalf) {
+        double starBudget = buyAmount / 2;
+        double avgBudget = buyAmount / 2;
+        
+        double starQty = (starBudget / buyStar).floorToDouble();
+        double avgQty = (avgBudget / avg).roundToDouble();
+        
+        if (starQty > 0) addOrder(OrderType.locBuy, buyStar, starQty, 'starBuy', tDelta: 0.5);
+        if (avgQty > 0) addOrder(OrderType.locBuy, avg, avgQty, 'avgBuy', tDelta: 0.5);
+        
+        double baseQty = starQty + avgQty;
+        for (int i = 1; i <= 10; i++) {
+          double extraPrice = buyAmount / (baseQty + i);
+          addOrder(OrderType.locBuy, extraPrice, 1.0, 'extra');
         }
-        buyOrders.add(starOrder);
-      }
-    }
-
-    // --- 4. AvgBuy (전반전만) ---
-    if (isFirstHalf) {
-      final avgBuyQty = (s.buyAmount / s.avg).floor();
-      if (avgBuyQty > 0) {
-        final avgOrder = Order(
-          id: _genId(),
-          type: OrderType.locBuy,
-          price: s.avg,
-          qty: avgBuyQty,
-          label: 'AvgBuy LOC매수',
-        );
-        if (prevClose <= s.avg) {
-          _fillBuy(s, prevClose, avgBuyQty);
-          s.t += 0.5;
-          avgOrder.status = OrderStatus.filled;
-          avgOrder.filledPrice = prevClose;
-          logs.add('✅ AvgBuy 체결: ${avgBuyQty}주 @ \$${prevClose.toStringAsFixed(2)}, T=${s.t.toStringAsFixed(2)}');
-        }
-        buyOrders.add(avgOrder);
-      }
-    }
-
-    // --- 5. 추가 LOC 10개 (1주씩) ---
-    if (s.qty > 0) {
-      for (int i = 1; i <= 10; i++) {
-        final extraPrice = s.buyAmount / (s.qty + i);
-        final extraOrder = Order(
-          id: _genId(),
-          type: OrderType.locBuy,
-          price: extraPrice,
-          qty: 1,
-          label: '추가LOC$i',
-        );
-        if (prevClose <= extraPrice) {
-          _fillBuy(s, prevClose, 1);
-          extraOrder.status = OrderStatus.filled;
-          extraOrder.filledPrice = prevClose;
-          logs.add('  ✅ 추가LOC$i 체결: 1주 @ \$${prevClose.toStringAsFixed(2)}');
-        }
-        buyOrders.add(extraOrder);
-      }
-    }
-  }
-
-  // ───────────────────────────────────────────
-  // 리버스 모드
-  // ───────────────────────────────────────────
-  static void _processReverseMode(
-    StrategyState s,
-    double prevClose,
-    double prevHigh,
-    List<Order> buyOrders,
-    List<Order> sellOrders,
-    List<String> logs,
-  ) {
-    final starPrice = s.sma5; // 리버스 별지점 = SMA5
-
-    // 리버스 종료 체크
-    final reverseEndThreshold = s.avg * (1 - s.targetProfit / 100);
-    if (prevClose >= reverseEndThreshold && s.avg > 0) {
-      s.mode = StrategyMode.normal;
-      logs.add('🔄 REVERSE 종료 → NORMAL 전환');
-      return;
-    }
-
-    // 리버스 첫날 여부: closeHistory 마지막 추가가 첫 번째 리버스날
-    // 판단: 이전 closeHistory 길이로 추적 (간단히 isFirstReverseDay 플래그 사용)
-    // 여기서는 매도 먼저 실행 (MOC or LOC)
-    final sellQty = (s.qty / (s.splitCount / 2)).floor();
-
-    // 매도 (MOC or LOC @ StarPrice)
-    if (sellQty > 0) {
-      final isMoc = _isFirstReverseDay(s);
-      if (isMoc) {
-        // MOC Sell - 항상 체결 @ PrevClose
-        final mocOrder = Order(
-          id: _genId(),
-          type: OrderType.mocSell,
-          price: prevClose,
-          qty: sellQty,
-          label: '리버스 MOC매도 (첫날)',
-        );
-        _fillSell(s, prevClose, sellQty);
-        s.t = s.t * (1 - 2 / s.splitCount);
-        mocOrder.status = OrderStatus.filled;
-        mocOrder.filledPrice = prevClose;
-        sellOrders.add(mocOrder);
-        logs.add('✅ 리버스MOC매도(첫날): ${sellQty}주 @ \$${prevClose.toStringAsFixed(2)}, T=${s.t.toStringAsFixed(2)}');
       } else {
-        // LOC Sell @ StarPrice
-        final locSellOrder = Order(
-          id: _genId(),
-          type: OrderType.locSell,
-          price: starPrice,
-          qty: sellQty,
-          label: '리버스 LOC매도',
-        );
-        if (prevClose >= starPrice) {
-          _fillSell(s, prevClose, sellQty);
-          s.t = s.t * (1 - 2 / s.splitCount);
-          locSellOrder.status = OrderStatus.filled;
-          locSellOrder.filledPrice = prevClose;
-          logs.add('✅ 리버스LOC매도: ${sellQty}주 @ \$${prevClose.toStringAsFixed(2)}, T=${s.t.toStringAsFixed(2)}');
+        double starQty = (buyAmount / buyStar).floorToDouble();
+        if (starQty > 0) addOrder(OrderType.locBuy, buyStar, starQty, 'starBuy', tDelta: 1.0);
+        
+        for (int i = 1; i <= 10; i++) {
+          double extraPrice = buyAmount / (starQty + i);
+          addOrder(OrderType.locBuy, extraPrice, 1.0, 'extra');
         }
-        sellOrders.add(locSellOrder);
+      }
+    } 
+    // Reverse Mode
+    else if (currentMode == Mode.reverse) {
+      double starPrice = sma5;
+      double sellQty = (qty / (n / 2)).floorToDouble();
+      
+      bool isDay1 = state.t > state.splitCount - 1;
+
+      if (isDay1) {
+        if (sellQty > 0) addOrder(OrderType.mocSell, prevClose, sellQty, 'reverseSell', tFactor: (1 - 2/n));
+      } else {
+        if (sellQty > 0) addOrder(OrderType.locSell, starPrice, sellQty, 'reverseSell', tFactor: (1 - 2/n));
+        
+        double quarterBuyAmount = cash / 4;
+        double starQty = (quarterBuyAmount / starPrice).floorToDouble();
+        if (starQty > 0) {
+           addOrder(OrderType.locBuy, starPrice, starQty, 'reverseBuy', tDelta: (n - t) * 0.25);
+           
+           for (int i = 1; i <= 10; i++) {
+             double extraPrice = quarterBuyAmount / (starQty + i);
+             addOrder(OrderType.locBuy, extraPrice, 1.0, 'extra');
+           }
+        }
       }
     }
 
-    // 매수 (리버스 둘째날 이후)
-    if (!_isFirstReverseDay(s)) {
-      final quarterBuyAmount = s.cash / 4;
-      final starQty = starPrice > 0 ? (quarterBuyAmount / starPrice).floor() : 0;
+    // 4. Execute Orders
+    internalOrders.sort((a, b) {
+      int pA = _getPriority(a.category, currentMode);
+      int pB = _getPriority(b.category, currentMode);
+      return pA.compareTo(pB);
+    });
 
-      if (starQty > 0) {
-        final locBuyOrder = Order(
-          id: _genId(),
-          type: OrderType.locBuy,
-          price: starPrice,
-          qty: starQty,
-          label: '리버스 LOC매수',
-        );
-        if (prevClose <= starPrice) {
-          _fillBuy(s, prevClose, starQty);
-          s.t = s.t + (s.splitCount - s.t) * 0.25;
-          locBuyOrder.status = OrderStatus.filled;
-          locBuyOrder.filledPrice = prevClose;
-          logs.add('✅ 리버스LOC매수: ${starQty}주 @ \$${prevClose.toStringAsFixed(2)}, T=${s.t.toStringAsFixed(2)}');
+    double newCash = cash;
+    double newQty = qty;
+    double newAvg = avg;
+    double newT = t;
+    List<Order> executedOrders = [];
+
+    for (var order in internalOrders) {
+      bool filled = false;
+      double fillPrice = 0;
+
+      if (order.type == OrderType.locBuy) {
+        if (prevClose <= order.price) {
+          filled = true;
+          fillPrice = prevClose;
         }
-        buyOrders.add(locBuyOrder);
+      } else if (order.type == OrderType.locSell) {
+        if (prevClose >= order.price) {
+          filled = true;
+          fillPrice = prevClose;
+        }
+      } else if (order.type == OrderType.mocSell) {
+        filled = true;
+        fillPrice = prevClose;
+      } else if (order.type == OrderType.limitSell) {
+        if (prevHigh >= order.price) {
+          filled = true;
+          fillPrice = order.price;
+        }
       }
 
-      // 추가 LOC 10개 (1주씩)
-      for (int i = 1; i <= 10; i++) {
-        final extraPrice = starPrice * (1 - i * 0.005);
-        final extraOrder = Order(
-          id: _genId(),
-          type: OrderType.locBuy,
-          price: extraPrice,
-          qty: 1,
-          label: '리버스추가LOC$i',
-        );
-        if (prevClose <= extraPrice && extraPrice > 0) {
-          _fillBuy(s, prevClose, 1);
-          extraOrder.status = OrderStatus.filled;
-          extraOrder.filledPrice = prevClose;
-          logs.add('  ✅ 리버스추가LOC$i 체결: 1주');
+      if (filled) {
+        bool isBuy = (order.type == OrderType.locBuy);
+        bool isSell = (order.type == OrderType.locSell || order.type == OrderType.mocSell || order.type == OrderType.limitSell);
+
+        if (isBuy) {
+          double cost = order.qty * fillPrice;
+          if (newCash >= cost) {
+            newCash -= cost;
+            double totalQty = newQty + order.qty;
+            if (totalQty > 0) {
+              newAvg = ((newAvg * newQty) + (fillPrice * order.qty)) / totalQty;
+            }
+            newQty = totalQty;
+            if (order.tDelta != null) newT += order.tDelta!;
+            
+            executedOrders.add(Order(type: order.type, orderPrice: order.price, qty: order.qty));
+          }
+        } else if (isSell) {
+          if (newQty >= order.qty) {
+            newCash += order.qty * fillPrice;
+            newQty -= order.qty;
+            if (order.tFactor != null) newT *= order.tFactor!;
+            
+            executedOrders.add(Order(type: order.type, orderPrice: order.price, qty: order.qty));
+          }
         }
-        buyOrders.add(extraOrder);
+      } else {
+        // Record unfilled orders for dashboard display? 
+        // Spec says "Today's Orders" in Dashboard. Usually means generated orders.
+        // I will include all generated orders in the result, but mark them?
+        // The Step 1 Order class doesn't have 'filled' status.
+        // I'll just return the list of ALL generated orders as 'todaysOrders'.
       }
     }
-  }
+    
+    // Map all internal orders to public Order objects for the UI
+    List<Order> todaysOrders = internalOrders.map((o) => Order(
+      type: o.type,
+      orderPrice: o.price,
+      qty: o.qty,
+    )).toList();
 
-  static bool _isFirstReverseDay(StrategyState s) {
-    // 리버스 모드 진입 후 closeHistory 추가 전 판별
-    // 간단히 t 값이 splitCount-1 초과인 상태에서 처음 호출되는 날
-    // 실제로는 별도 플래그 필요하지만 여기서는 t > splitCount * 0.9 로 근사
-    return s.t > s.splitCount * 0.95;
-  }
+    // 5. Stats
+    double maxT = max(state.maxT, newT);
+    double maxQty = max(state.maxQty, newQty);
+    double exposure = newQty * prevClose;
+    double maxExposure = max(state.maxExposure, exposure);
 
-  // ───────────────────────────────────────────
-  // 사이클 완료
-  // ───────────────────────────────────────────
-  static void _completeCycle(StrategyState s, double prevClose, List<String> logs) {
-    // 전량 청산
-    if (s.qty > 0) {
-      s.cash += s.qty * prevClose;
-      logs.add('🏁 사이클 완료: ${s.qty}주 청산 @ \$${prevClose.toStringAsFixed(2)}');
+    // 6. Cycle Check
+    bool hasPosition = newQty > 0;
+    CycleStatus status = state.cycleStatus;
+    CompletionReason? reason = state.completionReason;
+    CycleResult? result;
+
+    if (state.hasPosition && !hasPosition) {
+      status = CycleStatus.completed;
+      reason = CompletionReason.normalExit;
+      
+      double endAsset = newCash;
+      double totalProfit = endAsset - state.startCapital;
+      double returnRate = (totalProfit / state.startCapital) * 100;
+      int days = DateTime.now().difference(state.startDate).inDays;
+
+      result = CycleResult(
+        symbol: state.symbol,
+        splitCount: state.splitCount,
+        targetProfit: state.targetProfit,
+        startCapital: state.startCapital,
+        endAsset: endAsset,
+        totalProfit: totalProfit,
+        returnRate: returnRate,
+        investmentPeriod: days,
+        maxT: maxT,
+        maxQty: maxQty,
+        maxExposure: maxExposure,
+        completionReason: reason,
+      );
     }
 
-    final endCash = s.cash;
-    final profit = endCash - s.startCapital;
-    final profitRate = (endCash / s.startCapital - 1) * 100;
-
-    final result = CycleResult(
-      cycleNumber: s.currentCycle,
-      startDate: s.startDate,
-      endDate: DateTime.now(),
-      startCapital: s.startCapital,
-      endCash: endCash,
-      totalProfit: profit,
-      profitRate: profitRate,
-      maxT: s.maxT,
-      maxQty: s.maxQty,
-      maxExposure: s.maxExposure,
+    // 7. Return
+    StrategyState newState = state.copyWith(
+      cash: newCash,
+      qty: newQty,
+      avg: newAvg,
+      t: newT,
+      mode: currentMode,
+      closeHistory: newHistory,
+      hasPosition: hasPosition,
+      maxT: maxT,
+      maxQty: maxQty,
+      maxExposure: maxExposure,
+      cycleStatus: status,
+      completionReason: reason,
     );
-    s.cycleResults.add(result);
 
-    // 리셋
-    s.qty = 0;
-    s.avg = 0;
-    s.t = 0;
-    s.mode = StrategyMode.normal;
-    s.maxT = 0;
-    s.maxQty = 0;
-    s.maxExposure = 0;
-    s.startDate = DateTime.now();
-    s.startCapital = s.cash;
-    s.currentCycle++;
-
-    logs.add('💰 사이클${result.cycleNumber} 완료: 수익 \$${profit.toStringAsFixed(2)} (${profitRate.toStringAsFixed(2)}%)');
+    return DayResult(
+      state: newState,
+      cycleResult: result,
+      todaysOrders: todaysOrders,
+    );
   }
 
-  // ───────────────────────────────────────────
-  // 내부 헬퍼
-  // ───────────────────────────────────────────
-  static void _fillBuy(StrategyState s, double price, int qty) {
-    final cost = price * qty;
-    if (cost > s.cash) return; // 잔금 부족 시 스킵
-    final prevTotal = s.avg * s.qty;
-    s.cash -= cost;
-    s.qty += qty;
-    s.avg = s.qty > 0 ? (prevTotal + cost) / s.qty : 0;
+  DayResult forceClose(StrategyState state, double forceExitPrice) {
+    double sellValue = state.qty * forceExitPrice;
+    double newCash = state.cash + sellValue;
+    
+    double endAsset = newCash;
+    double totalProfit = endAsset - state.startCapital;
+    double returnRate = (totalProfit / state.startCapital) * 100;
+    int days = DateTime.now().difference(state.startDate).inDays;
+
+    CycleResult result = CycleResult(
+      symbol: state.symbol,
+      splitCount: state.splitCount,
+      targetProfit: state.targetProfit,
+      startCapital: state.startCapital,
+      endAsset: endAsset,
+      totalProfit: totalProfit,
+      returnRate: returnRate,
+      investmentPeriod: days,
+      maxT: state.maxT,
+      maxQty: state.maxQty,
+      maxExposure: state.maxExposure,
+      completionReason: CompletionReason.forcedExit,
+    );
+
+    StrategyState newState = state.copyWith(
+      cash: newCash,
+      qty: 0,
+      avg: 0,
+      t: 0,
+      mode: Mode.normal,
+      hasPosition: false,
+      cycleStatus: CycleStatus.completed,
+      completionReason: CompletionReason.forcedExit,
+    );
+
+    Order forceOrder = Order(
+      type: OrderType.limitSell,
+      orderPrice: forceExitPrice,
+      qty: state.qty,
+    );
+
+    return DayResult(
+      state: newState,
+      cycleResult: result,
+      todaysOrders: [forceOrder],
+    );
   }
 
-  static void _fillSell(StrategyState s, double price, int qty) {
-    final actualQty = qty > s.qty ? s.qty : qty;
-    s.cash += price * actualQty;
-    s.qty -= actualQty;
-    if (s.qty == 0) s.avg = 0;
+  int _getPriority(String category, Mode mode) {
+    if (mode == Mode.normal) {
+      switch (category) {
+        case 'limitSell': return 1;
+        case 'quarterSell': return 2;
+        case 'starBuy': return 3;
+        case 'avgBuy': return 4;
+        case 'entry': return 3;
+        case 'extra': return 5;
+        default: return 99;
+      }
+    } else {
+      switch (category) {
+        case 'reverseSell': return 1;
+        case 'reverseBuy': return 2;
+        case 'extra': return 3;
+        default: return 99;
+      }
+    }
   }
-
-  static StrategyState _cloneState(StrategyState s) {
-    return StrategyState.fromJson(s.toJson());
-  }
-
-  static String _genId() =>
-      DateTime.now().microsecondsSinceEpoch.toString() +
-      (1000 + (DateTime.now().millisecond % 1000)).toString();
 }
