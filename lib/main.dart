@@ -1,129 +1,66 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
-import 'package:provider/provider.dart';
-import 'providers/strategy_provider.dart';
-import 'screens/start_screen.dart';
-import 'screens/dashboard_screen.dart';
+import 'pages/create_strategy_page.dart';
+import 'services/persistence_service.dart';
+import 'pages/dashboard_page.dart';
 
-void main() async {
+void main() {
   WidgetsFlutterBinding.ensureInitialized();
-  SystemChrome.setPreferredOrientations([
-    DeviceOrientation.portraitUp,
-    DeviceOrientation.landscapeLeft,
-    DeviceOrientation.landscapeRight,
-  ]);
-  runApp(const InfinityBuyApp());
+  runApp(const MyApp());
 }
 
-class InfinityBuyApp extends StatelessWidget {
-  const InfinityBuyApp({super.key});
+class MyApp extends StatelessWidget {
+  const MyApp({super.key});
 
   @override
   Widget build(BuildContext context) {
-    return ChangeNotifierProvider(
-      create: (_) => StrategyProvider(),
-      child: MaterialApp(
-        title: '무한매수법 4.0',
-        debugShowCheckedModeBanner: false,
-        theme: _buildTheme(Brightness.light),
-        darkTheme: _buildTheme(Brightness.dark),
-        themeMode: ThemeMode.system,
-        home: const _AppEntryPoint(),
+    return MaterialApp(
+      title: '무한매수법 V4.0',
+      debugShowCheckedModeBanner: false,
+      theme: ThemeData(
+        colorSchemeSeed: Colors.blue,
+        useMaterial3: true,
+        brightness: Brightness.light,
       ),
-    );
-  }
-
-  ThemeData _buildTheme(Brightness brightness) {
-    final isDark = brightness == Brightness.dark;
-
-    final colorScheme = ColorScheme.fromSeed(
-      seedColor: const Color(0xFF1565C0),
-      brightness: brightness,
-    );
-
-    return ThemeData(
-      useMaterial3: true,
-      colorScheme: colorScheme,
-      brightness: brightness,
-      fontFamily: 'Roboto',
-      appBarTheme: AppBarTheme(
-        elevation: 0,
-        scrolledUnderElevation: 1,
-        backgroundColor: colorScheme.surface,
-        foregroundColor: colorScheme.onSurface,
-        titleTextStyle: TextStyle(
-          color: colorScheme.onSurface,
-          fontWeight: FontWeight.bold,
-          fontSize: 18,
-        ),
+      darkTheme: ThemeData(
+        colorSchemeSeed: Colors.blue,
+        useMaterial3: true,
+        brightness: Brightness.dark,
       ),
-      cardTheme: CardTheme(
-        elevation: 0,
-        margin: EdgeInsets.zero,
-        shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(12),
-        ),
-      ),
-      inputDecorationTheme: InputDecorationTheme(
-        border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
-        contentPadding:
-            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      ),
-      filledButtonTheme: FilledButtonThemeData(
-        style: FilledButton.styleFrom(
-          shape: RoundedRectangleBorder(
-              borderRadius: BorderRadius.circular(12)),
-        ),
-      ),
+      themeMode: ThemeMode.system,
+      home: const StartupRouter(),
     );
   }
 }
 
-class _AppEntryPoint extends StatefulWidget {
-  const _AppEntryPoint();
+/// 앱 시작 시 저장된 전략이 있으면 Dashboard로, 없으면 CreateStrategyPage로 라우팅
+class StartupRouter extends StatefulWidget {
+  const StartupRouter({super.key});
 
   @override
-  State<_AppEntryPoint> createState() => _AppEntryPointState();
+  State<StartupRouter> createState() => _StartupRouterState();
 }
 
-class _AppEntryPointState extends State<_AppEntryPoint> {
+class _StartupRouterState extends State<StartupRouter> {
+  late Future<bool> _hasRunningCycle;
+
+  @override
+  void initState() {
+    super.initState();
+    _hasRunningCycle = PersistenceService().loadState().then((s) => s != null);
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Consumer<StrategyProvider>(
-      builder: (context, provider, _) {
-        if (provider.isLoading) {
-          return Scaffold(
-            body: Center(
-              child: Column(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  Icon(
-                    Icons.trending_up_rounded,
-                    size: 64,
-                    color: Theme.of(context).colorScheme.primary,
-                  ),
-                  const SizedBox(height: 20),
-                  const Text(
-                    '무한매수법 4.0',
-                    style: TextStyle(
-                        fontSize: 24, fontWeight: FontWeight.bold),
-                  ),
-                  const SizedBox(height: 12),
-                  const Text('SOXL 전용',
-                      style: TextStyle(color: Colors.grey)),
-                  const SizedBox(height: 24),
-                  const CircularProgressIndicator(),
-                ],
-              ),
-            ),
-          );
+    return FutureBuilder<bool>(
+      future: _hasRunningCycle,
+      builder: (context, snapshot) {
+        if (!snapshot.hasData) {
+          return const Scaffold(body: Center(child: CircularProgressIndicator()));
         }
-
-        if (provider.hasActiveStrategy) {
-          return const DashboardScreen();
+        if (snapshot.data == true) {
+          return const DashboardPage();
         }
-
-        return const StartScreen();
+        return const CreateStrategyPage();
       },
     );
   }
