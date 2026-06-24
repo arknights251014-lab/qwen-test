@@ -60,7 +60,7 @@ class StrategyEngine {
     // Check Reverse Exit
     if (currentMode == Mode.reverse && state.hasPosition) {
       double exitThreshold = state.avg * (1 - state.targetProfit / 100);
-      if (prevClose <= exitThreshold) {
+      if (prevClose >= exitThreshold) {
         currentMode = Mode.normal;
       }
     }
@@ -106,7 +106,7 @@ class StrategyEngine {
     // Normal Mode
     else if (currentMode == Mode.normal) {
       double buyAmount = cash / (n - t);
-      double starPct = (tp / n) * 2 * t;
+      double starPct = tp - (tp / n * 2 * t);
       double starPrice = avg * (1 + starPct / 100);
       double buyStar = starPrice - 0.01;
       double sellStar = starPrice;
@@ -154,7 +154,9 @@ class StrategyEngine {
       double starPrice = sma5;
       double sellQty = (qty / (n / 2)).floorToDouble();
       
-      bool isDay1 = state.t > state.splitCount - 1;
+      bool isDay1 =
+    state.mode != Mode.reverse &&
+    currentMode == Mode.reverse;
 
       if (isDay1) {
         if (sellQty > 0) addOrder(OrderType.mocSell, prevClose, sellQty, 'reverseSell', tFactor: (1 - 2/n));
