@@ -1,8 +1,8 @@
 // dashboard_page.dart
 import 'package:flutter/material.dart';
-import '../strategy_state.dart';
-import '../strategy_engine.dart';
-import '../persistence_service.dart';
+import '../models/strategy_state.dart';
+import '../engine/strategy_engine.dart';
+import '../services/persistence_service.dart';
 import 'create_strategy_page.dart';
 import 'cycle_result_page.dart';
 
