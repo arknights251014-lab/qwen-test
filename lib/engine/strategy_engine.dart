@@ -1,6 +1,6 @@
 import 'dart:math';
-import '../modles/order.dart';
-import '../modles/cycle_result.dart';
+import '../models/order.dart';
+import '../models/cycle_result.dart';
 import '../models/strategy_state.dart';
 
 class DayResult {
