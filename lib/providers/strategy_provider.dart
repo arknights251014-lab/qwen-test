@@ -1,4 +1,5 @@
 import 'package:flutter/foundation.dart';
+
 import '../models/strategy_state.dart';
 import '../models/order.dart';
 import '../services/strategy_engine.dart';
@@ -12,6 +13,7 @@ class StrategyProvider extends ChangeNotifier {
   String _lastLog = '';
 
   List<Order> _lastBuyOrders = [];
+
   List<Order> _lastSellOrders = [];
 
   bool _cycleJustCompleted = false;
@@ -36,57 +38,52 @@ class StrategyProvider extends ChangeNotifier {
 
   Future<void> _loadFromStorage() async {
     _isLoading = true;
+
     notifyListeners();
 
     _state = await LocalStorage.loadState();
 
     _isLoading = false;
+
     notifyListeners();
   }
 
-  /// 신규 시작 + 중간진입 공용
+  // ==========================================================
+  // 신규 시작
+  // ==========================================================
+
   Future<void> startStrategy({
     required String symbol,
-    required double cash,
+    required double capital,
     required int splitCount,
     required double targetProfit,
-
-    int qty = 0,
-    double avg = 0,
-    double t = 0,
-
-    StrategyMode mode = StrategyMode.normal,
-
-    List<double>? closeHistory,
   }) async {
     _state = StrategyState(
       symbol: symbol,
 
       splitCount: splitCount,
+
       targetProfit: targetProfit,
 
-      cash: cash,
+      cash: capital,
 
-      qty: qty,
-      avg: avg,
-      t: t,
+      qty: 0,
 
-      mode: mode,
+      avg: 0,
 
-      hasPosition: qty > 0,
+      t: 0,
 
-      cycleStatus: CycleStatus.running,
-
-      closeHistory: closeHistory ?? [],
+      startCapital: capital,
 
       startDate: DateTime.now(),
-      startCapital: cash,
 
-      currentCycle: 1,
+      hasPosition: false,
     );
 
     _lastBuyOrders = [];
+
     _lastSellOrders = [];
+
     _lastLog = '';
 
     _cycleJustCompleted = false;
@@ -96,22 +93,74 @@ class StrategyProvider extends ChangeNotifier {
     notifyListeners();
   }
 
-  Future<void> calculate(
-    double prevClose,
-    double prevHigh,
-  ) async {
+  // ==========================================================
+  // 중간 진입
+  // ==========================================================
+
+  Future<void> startMidPosition({
+    required String symbol,
+
+    required double cash,
+
+    required int qty,
+
+    required double avg,
+
+    required double t,
+
+    required int splitCount,
+
+    required double targetProfit,
+  }) async {
+    _state = StrategyState(
+      symbol: symbol,
+
+      splitCount: splitCount,
+
+      targetProfit: targetProfit,
+
+      cash: cash,
+
+      qty: qty,
+
+      avg: avg,
+
+      t: t,
+
+      hasPosition: qty > 0,
+
+      startCapital: cash + (qty * avg),
+
+      startDate: DateTime.now(),
+    );
+
+    _lastBuyOrders = [];
+
+    _lastSellOrders = [];
+
+    _lastLog = '';
+
+    _cycleJustCompleted = false;
+
+    await LocalStorage.saveState(_state!);
+
+    notifyListeners();
+  }
+
+  // ==========================================================
+  // 하루 계산
+  // ==========================================================
+
+  Future<void> calculate({
+    required double prevClose,
+    required double prevHigh,
+  }) async {
     if (_state == null) return;
 
-    if (_state!.cycleStatus ==
-        CycleStatus.completed) {
-      return;
-    }
-
-    final beforeCount =
+    final prevCycleCount =
         _state!.cycleResults.length;
 
-    final result =
-        StrategyEngine.calculate(
+    final result = StrategyEngine.calculate(
       _state!,
       prevClose,
       prevHigh,
@@ -120,48 +169,44 @@ class StrategyProvider extends ChangeNotifier {
     _state = result.updatedState;
 
     _lastBuyOrders = result.buyOrders;
+
     _lastSellOrders = result.sellOrders;
 
     _lastLog = result.log;
 
     _cycleJustCompleted =
         _state!.cycleResults.length >
-            beforeCount;
+            prevCycleCount;
 
     await LocalStorage.saveState(_state!);
 
     notifyListeners();
   }
 
-  /// 강제 종료
+  // ==========================================================
+  // 강제 종료
+  // ==========================================================
+
   Future<void> forceCompleteCycle(
-      double exitPrice) async {
+    double exitPrice,
+  ) async {
     if (_state == null) return;
 
-    final s = _state!;
+    StrategyEngine.forceCompleteCycle(
+      _state!,
+      exitPrice,
+    );
 
-    if (s.qty > 0) {
-      s.cash += s.qty * exitPrice;
-    }
+    _cycleJustCompleted = true;
 
-    s.qty = 0;
-    s.avg = 0;
-    s.t = 0;
-
-    s.mode = StrategyMode.normal;
-
-    s.hasPosition = false;
-
-    s.cycleStatus =
-        CycleStatus.completed;
-
-    s.completionReason =
-        CompletionReason.forcedExit;
-
-    await LocalStorage.saveState(s);
+    await LocalStorage.saveState(_state!);
 
     notifyListeners();
   }
+
+  // ==========================================================
+  // 전략 초기화
+  // ==========================================================
 
   Future<void> resetStrategy() async {
     await LocalStorage.clearState();
@@ -169,7 +214,9 @@ class StrategyProvider extends ChangeNotifier {
     _state = null;
 
     _lastBuyOrders = [];
+
     _lastSellOrders = [];
+
     _lastLog = '';
 
     _cycleJustCompleted = false;
@@ -177,8 +224,13 @@ class StrategyProvider extends ChangeNotifier {
     notifyListeners();
   }
 
+  // ==========================================================
+  // 사이클 완료 플래그 제거
+  // ==========================================================
+
   void clearCycleFlag() {
     _cycleJustCompleted = false;
+
     notifyListeners();
   }
 }
