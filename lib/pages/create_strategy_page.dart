@@ -1,7 +1,7 @@
 // create_strategy_page.dart
 import 'package:flutter/material.dart';
 import '../models/strategy_state.dart';
-import '../service/persistence_service.dart';
+import '../services/persistence_service.dart';
 import 'dashboard_page.dart';
 
 class CreateStrategyPage extends StatefulWidget {
