@@ -47,7 +47,9 @@ class _DashboardPageState extends State<DashboardPage> {
   double _getCycleReturn(double prevClose) => (_getCyclePnL(prevClose) / _state!.startCapital) * 100;
 
   double _getBuyAmount() => _state!.cash / (_state!.splitCount - _state!.t);
-  double _getStarPct() => (_state!.targetProfit / _state!.splitCount) * 2 * _state!.t;
+  double _getStarPct() =>
+    _state!.targetProfit -
+    ((_state!.targetProfit / _state!.splitCount) * 2 * _state!.t);
   double _getStarPrice() => _state!.avg * (1 + _getStarPct() / 100);
   double _getBuyStar() => _getStarPrice() - 0.01;
   double _getSellStar() => _getStarPrice();
@@ -262,7 +264,7 @@ class _DashboardPageState extends State<DashboardPage> {
                   child: Column(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      const Text('오늘 체결된 주문', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
+                      const Text('오늘 생성된 주문', style: TextStyle(fontSize: 18, fontWeight: FontWeight.bold)),
                       ..._lastDayResult!.todaysOrders.map((o) => ListTile(
                         title: Text(o.type.name),
                         subtitle: Text('Price: ${o.orderPrice.toStringAsFixed(2)} / Qty: ${o.qty.toStringAsFixed(2)}'),
