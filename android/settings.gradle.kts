@@ -4,8 +4,12 @@ pluginManagement {
         file("local.properties").inputStream().use {
             properties.load(it)
         }
+
         val path = properties.getProperty("flutter.sdk")
-        require(path != null) { "flutter.sdk not set in local.properties" }
+        require(path != null) {
+            "flutter.sdk not set in local.properties"
+        }
+
         path
     }
 
