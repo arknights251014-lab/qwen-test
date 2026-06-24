@@ -1,7 +1,7 @@
 // cycle_result_page.dart
 import 'package:flutter/material.dart';
-import '../cycle_result.dart';
-import '../persistence_service.dart';
+import '../models/cycle_result.dart';
+import '../services/persistence_service.dart';
 import 'create_strategy_page.dart';
 
 class CycleResultPage extends StatelessWidget {
