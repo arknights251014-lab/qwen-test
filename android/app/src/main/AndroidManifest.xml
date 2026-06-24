@@ -2,7 +2,6 @@
     <application
         android:label="무한매수법 V4.0"
         android:name="${applicationName}"
-        android:icon="@mipmap/ic_launcher">
         <activity
             android:name=".MainActivity"
             android:exported="true"
