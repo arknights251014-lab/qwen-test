@@ -1,7 +1,7 @@
 // persistence_service.dart
 import 'dart:convert';
 import 'package:shared_preferences/shared_preferences.dart';
-import 'strategy_state.dart';
+import '../models/strategy_state.dart';
 
 class PersistenceService {
   static const String _keyStrategyState = 'strategy_state';
